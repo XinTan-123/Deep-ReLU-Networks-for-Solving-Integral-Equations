@@ -1,0 +1,337 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.linalg import solve
+import time
+
+
+class NystromSolver:
+    def __init__(self, n_points=100, quad_type='uniform'):
+        self.n_points = n_points
+        self.quad_type = quad_type
+        self.quad_points = None
+        self.quad_weights = None
+        self.solution = None
+
+    def generate_quadrature(self):
+        """生成积分点和权重"""
+        if self.quad_type == 'uniform':
+            # 均匀网格积分
+            n_per_dim = int(np.sqrt(self.n_points))
+            if n_per_dim ** 2 != self.n_points:
+                n_per_dim = int(np.sqrt(self.n_points))
+                self.n_points = n_per_dim ** 2
+                print(f"调整点数为完全平方数: {self.n_points}")
+
+            x1 = np.linspace(0, 1, n_per_dim)
+            x2 = np.linspace(0, 1, n_per_dim)
+            X1, X2 = np.meshgrid(x1, x2)
+            points = np.column_stack([X1.ravel(), X2.ravel()])
+
+            # 均匀权重
+            weight = 1.0 / self.n_points
+            weights = np.full(self.n_points, weight)
+
+        elif self.quad_type == 'random':
+            # 蒙特卡洛积分
+            points = np.random.rand(self.n_points, 2)
+            weights = np.full(self.n_points, 1.0 / self.n_points)
+
+
+
+        self.quad_points = points
+        self.quad_weights = weights
+        print(f"生成 {len(points)} 个积分点")
+        return points, weights
+
+    def kernel_function(self, x, t):
+        """核函数 K(x,t) = e^(x1 + t1)"""
+        return np.exp(x[0] + t[0])
+
+    def right_hand_side(self, x):
+        """右端项 f(x) = (e+1)/2 * e^x1 + x1 + x2"""
+        return (np.e + 1) / 2 * np.exp(x[0]) + x[0] + x[1]
+
+    def exact_solution(self, x):
+        """精确解 u(x) = x1 + x2"""
+        return x[0] + x[1]
+
+    def assemble_system(self):
+        """组装Nyström离散系统"""
+        if self.quad_points is None:
+            self.generate_quadrature()
+
+        n = len(self.quad_points)
+        A = np.zeros((n, n))
+        b = np.zeros(n)
+
+        print("组装Nyström系统矩阵...")
+
+        for i in range(n):
+            x_i = self.quad_points[i]
+
+            for j in range(n):
+                t_j = self.quad_points[j]
+                w_j = self.quad_weights[j]
+
+                # 离散积分算子: K(x_i, t_j) * w_j
+                A[i, j] = self.kernel_function(x_i, t_j) * w_j
+
+            # 单位矩阵部分
+            A[i, i] += 1.0
+
+            # 右端项
+            b[i] = self.right_hand_side(x_i)
+
+            if (i + 1) % max(1, n // 10) == 0:
+                print(f"进度: {i + 1}/{n}")
+
+        return A, b
+
+    def solve(self):
+        """求解积分方程"""
+        start_time = time.time()
+
+        A, b = self.assemble_system()
+
+        print("求解线性系统...")
+        try:
+            u_quad = solve(A, b)
+        except:
+            print("直接求解失败，使用最小二乘...")
+            u_quad = np.linalg.lstsq(A, b, rcond=None)[0]
+
+        # 在积分点处的解
+        self.solution_quad = u_quad
+        self.quad_time = time.time() - start_time
+
+        print(f"求解完成，耗时: {self.quad_time:.2f} 秒")
+
+        return u_quad
+
+    def evaluate_solution(self, x_points):
+        """使用Nyström插值公式在任意点评估解"""
+        if self.solution_quad is None:
+            raise ValueError("需要先求解系统")
+
+        n_eval = len(x_points)
+        u_approx = np.zeros(n_eval)
+
+        for i in range(n_eval):
+            x = x_points[i]
+            sum_integral = 0.0
+
+            for j in range(len(self.quad_points)):
+                t_j = self.quad_points[j]
+                w_j = self.quad_weights[j]
+                sum_integral += self.kernel_function(x, t_j) * self.solution_quad[j] * w_j
+
+            # Nyström插值公式
+            u_approx[i] = self.right_hand_side(x) - sum_integral
+
+        return u_approx
+
+    def compute_errors(self, test_points=None):
+        """计算误差统计"""
+        if test_points is None:
+            test_points = self.quad_points
+
+        exact = np.array([self.exact_solution(x) for x in test_points])
+        approx = self.evaluate_solution(test_points)
+
+        absolute_errors = np.abs(approx - exact)
+        squared_errors = (approx - exact) ** 2
+
+        error_stats = {
+            'mse': np.mean(squared_errors),
+            'rmse': np.sqrt(np.mean(squared_errors)),
+            'max_error': np.max(absolute_errors),
+            'mean_abs_error': np.mean(absolute_errors),
+        }
+
+        return error_stats, approx, exact
+
+
+def run_nystrom_study():
+    """运行Nyström方法研究"""
+    print("Nyström方法求解积分方程")
+    print("方程: u(x) + ∫[0,1]² e^(x1+t1)u(t)dt = (e+1)/2 * e^x1 + x1 + x2")
+    print("精确解: u(x) = x1 + x2")
+    print("=" * 60)
+
+    n_points_list = [100, 1000, 10000]
+    quadrature_types = ['uniform', 'random']
+    results = []
+
+    # 创建测试点
+    n_test = 2500
+    x1_test = np.linspace(0, 1, 50)
+    x2_test = np.linspace(0, 1, 50)
+    X1_test, X2_test = np.meshgrid(x1_test, x2_test)
+    test_points = np.column_stack([X1_test.ravel(), X2_test.ravel()])
+
+    for quad_type in quadrature_types:
+        print(f"\n使用 {quad_type} 积分规则:")
+        print("-" * 40)
+
+        type_results = []
+
+        for n_points in n_points_list:
+            print(f"\n积分点数量: {n_points}")
+
+            try:
+                solver = NystromSolver(n_points=n_points, quad_type=quad_type)
+                solver.solve()
+
+                # 计算误差
+                error_stats, approx, exact = solver.compute_errors(test_points)
+
+                result = {
+                    'quad_type': quad_type,
+                    'n_points': n_points,
+                    'mse': error_stats['mse'],
+                    'rmse': error_stats['rmse'],
+                    'max_error': error_stats['max_error'],
+                    'mean_abs_error': error_stats['mean_abs_error'],
+                    'solve_time': solver.quad_time
+                }
+                type_results.append(result)
+
+                print(f"  MSE: {error_stats['mse']:.6e}")
+                print(f"  RMSE: {error_stats['rmse']:.6e}")
+                print(f"  最大误差: {error_stats['max_error']:.6e}")
+                print(f"  计算时间: {solver.quad_time:.2f} 秒")
+
+            except Exception as e:
+                print(f"  错误: {e}")
+                result = {
+                    'quad_type': quad_type,
+                    'n_points': n_points,
+                    'mse': np.nan,
+                    'rmse': np.nan,
+                    'max_error': np.nan,
+                    'mean_abs_error': np.nan,
+                    'solve_time': np.nan
+                }
+                type_results.append(result)
+
+        results.extend(type_results)
+
+    return results, test_points
+
+
+def plot_nystrom_results(results):
+    """绘制Nyström方法结果"""
+
+    # 按积分规则分类
+    quad_types = list(set([r['quad_type'] for r in results]))
+    n_points_list = sorted(list(set([r['n_points'] for r in results])))
+
+    fig, axes = plt.subplots(1, 1, figsize=(15, 12))
+
+    # 颜色映射
+    colors = {'uniform': 'blue', 'random': 'red'}
+    markers = {'uniform': 'o', 'random': 's'}
+
+    # 1. MSE比较
+    for quad_type in quad_types:
+        type_results = [r for r in results if r['quad_type'] == quad_type]
+        type_results.sort(key=lambda x: x['n_points'])
+
+
+
+    # 2. 最大误差比较
+    for quad_type in quad_types:
+        type_results = [r for r in results if r['quad_type'] == quad_type]
+        type_results.sort(key=lambda x: x['n_points'])
+
+
+
+    # 3. 计算时间比较
+    for quad_type in quad_types:
+        type_results = [r for r in results if r['quad_type'] == quad_type]
+        type_results.sort(key=lambda x: x['n_points'])
+
+        #times = [r['solve_time'] for r in type_results if not np.isnan(r['solve_time'])]
+        #n_points_valid = [r['n_points'] for r in type_results if not np.isnan(r['solve_time'])]
+
+
+
+    # 4. 结果表格
+    #axes[1, 1].axis('off')
+
+    table_data = []
+    for quad_type in quad_types:
+        for n_points in n_points_list:
+            result = next((r for r in results if r['quad_type'] == quad_type and r['n_points'] == n_points), None)
+            if result and not np.isnan(result['mse']):
+                table_data.append([
+                    quad_type,
+                    f'{n_points}',
+                    f'{result["mse"]:.2e}',
+                    f'{result["rmse"]:.2e}',
+                    f'{result["solve_time"]:.2f}s'
+                ])
+
+    if table_data:
+        table = plt.table(
+            cellText=table_data,
+            colLabels=['Int', 'Points', 'Mse', 'Rmse', 'Times'],
+            loc='center',
+            cellLoc='center'
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1, 1.5)
+
+    plt.tight_layout()
+    plt.savefig('nystrom_results.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def print_detailed_results(results):
+    """打印详细结果"""
+    print("\n" + "=" * 80)
+    print("Nyström方法详细结果")
+    print("=" * 80)
+
+    # 按积分规则分组
+    quad_types = sorted(list(set([r['quad_type'] for r in results])))
+
+    for quad_type in quad_types:
+        print(f"\n{quad_type.upper()} 积分规则:")
+        print(f"{'点数':<8} {'MSE':<12} {'RMSE':<12} {'最大误差':<12} {'平均误差':<12} {'时间(s)':<8}")
+        print("-" * 70)
+
+        type_results = [r for r in results if r['quad_type'] == quad_type]
+        type_results.sort(key=lambda x: x['n_points'])
+
+        for result in type_results:
+            if not np.isnan(result['mse']):
+                print(f"{result['n_points']:<8} {result['mse']:<12.2e} {result['rmse']:<12.2e} "
+                      f"{result['max_error']:<12.2e} {result['mean_abs_error']:<12.2e} {result['solve_time']:<8.2f}")
+            else:
+                print(
+                    f"{result['n_points']:<8} {'FAILED':<12} {'FAILED':<12} {'FAILED':<12} {'FAILED':<12} {'FAILED':<8}")
+
+
+def main():
+    """主函数"""
+
+    # 运行Nyström方法研究
+    results, test_points = run_nystrom_study()
+
+    # 打印详细结果
+    print_detailed_results(results)
+
+    # 绘制结果
+    plot_nystrom_results(results)
+
+    # 保存结果
+    import pandas as pd
+    df = pd.DataFrame(results)
+    df.to_csv('nystrom_results.csv', index=False)
+    print(f"\n结果已保存到 nystrom_results.csv")
+
+
+if __name__ == "__main__":
+    main()
